@@ -1,14 +1,14 @@
 name: 🔍 CodeQL Analysis
 on:
   push:
-    branches: ["main"]
+    branches: ["**"]
     paths-ignore:
       - '.github/workflows/**'
       - '.github/codeql-config.yml'
       - 'sonar-project.properties'
       - '.snyk'
   pull_request:
-    branches: ["main"]
+    branches: ["**"]
     paths-ignore:
       - '.github/workflows/**'
       - '.github/codeql-config.yml'
