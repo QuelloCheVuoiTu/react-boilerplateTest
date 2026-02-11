@@ -20,8 +20,6 @@ jobs:
   sonar-scan:
     name: SonarCloud Scan
     runs-on: ubuntu-latest
-
-    # Questo parametro ora dipende dalla tua scelta nella GUI
     continue-on-error: false
 
     steps:
@@ -54,32 +52,41 @@ jobs:
 
     - name: Install & Setup Build Wrapper (for C/C++)
       run: |
-        # Scarica il Build Wrapper necessario per C/C++ se presenti
         curl -sSLo build-wrapper.zip "https://sonarcloud.io/static/cpp/build-wrapper-linux-x86.zip"
         unzip -o build-wrapper.zip
-        # Aggiunge al PATH
         echo "$PWD/build-wrapper-linux-x86" >> $GITHUB_PATH
 
     - name: Smart Build & Detection (Dynamic)
       id: smart_build
       continue-on-error: true
       run: |
-        # Inizializza variabili
-        SONAR_ARGS="-Dsonar.qualitygate.wait=true"
+        # --- INIZIALIZZAZIONE SICURA ---
+        # Default a "." per evitare crash su stringhe vuote
         SONAR_BINARIES="."
+        SONAR_ARGS=""
 
         echo "::group::Auto-Detection Logic"
 
         # --- JAVA (Maven/Gradle) ---
+        # Se trova Java, prova a compilare.
         if [ -f "pom.xml" ]; then
           mvn package -DskipTests || true
-          BIN_PATH=$(find . -type d -name "classes" | tr '\n' ',' || echo ".")
-          SONAR_BINARIES="$BIN_PATH"
         elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
           chmod +x gradlew || true
           ./gradlew assemble -x test || true
-          BIN_PATH=$(find . -type d -path "*/classes/*/main" | tr '\n' ',' || echo ".")
-          SONAR_BINARIES="$BIN_PATH"
+        fi
+
+        # Cerca le classi compilate (FIXED LOGIC)
+        # Usa find e controlla se la stringa è vuota DOPO
+        FOUND_CLASSES=$(find . -type d \( -name "classes" -o -name "test-classes" \) | tr '\n' ',')
+
+        if [ -n "$FOUND_CLASSES" ]; then
+             # Rimuove l'ultima virgola se presente
+             SONAR_BINARIES="${FOUND_CLASSES%,}"
+             echo "✅ Found Java binaries: $SONAR_BINARIES"
+        else
+             echo "⚠️ No compiled classes found. Defaulting binaries to '.' (Source analysis only)"
+             SONAR_BINARIES="."
         fi
 
         # --- NODE / JS ---
@@ -93,52 +100,47 @@ jobs:
         fi
 
         # --- C/C++ DYNAMIC HANDLING ---
-        # Tenta di compilare con build-wrapper se trova file di build.
-        # Se non riesce, DISABILITA C/C++ per evitare Exit Code 3.
-
         HAS_CPP=false
         WRAPPER_OUT="bw-output"
 
+        # Tenta build C++ solo se trova i file di configurazione
         if [ -f "Makefile" ]; then
-            echo "Found Makefile. Attempting wrapped build..."
-            build-wrapper-linux-x86-64 --out-dir $WRAPPER_OUT make clean all || echo "Make build failed, continuing..."
+            build-wrapper-linux-x86-64 --out-dir $WRAPPER_OUT make clean all || true
             HAS_CPP=true
         elif [ -f "CMakeLists.txt" ]; then
-            echo "Found CMakeLists.txt. Attempting wrapped build..."
             mkdir -p build_wrapper_tmp
             cd build_wrapper_tmp
             cmake .. || true
             cd ..
-            build-wrapper-linux-x86-64 --out-dir $WRAPPER_OUT cmake --build build_wrapper_tmp || echo "CMake build failed, continuing..."
+            build-wrapper-linux-x86-64 --out-dir $WRAPPER_OUT cmake --build build_wrapper_tmp || true
             HAS_CPP=true
         fi
 
-        # Verifica se il build wrapper ha prodotto il JSON
         if [ "$HAS_CPP" = "true" ] && [ -f "$WRAPPER_OUT/compile_commands.json" ]; then
             echo "✅ C/C++ compilation database generated."
             SONAR_ARGS="$SONAR_ARGS -Dsonar.cfamily.compile-commands=$WRAPPER_OUT/compile_commands.json"
         else
-            # FALLBACK: Se non siamo riusciti a compilare o non c'è build system, 
-            # ESCLUDIAMO esplicitamente C/C++ per evitare che Sonar scoppi (Exit Code 3).
-            echo "⚠️ No compilation database found or build failed."
-            echo "ℹ️ Disabling C/C++/ObjC analysis to prevent scanner crash (Best Effort)."
+            # IMPORTANTE: Se non c'è build wrapper, DISABILITA i sensori C++
+            # Altrimenti SonarScanner va in crash se trova file .cpp ma non sa come compilarli
+            echo "ℹ️ Disabling C/C++ sensors to prevent analysis errors."
             SONAR_ARGS="$SONAR_ARGS -Dsonar.c.file.suffixes=- -Dsonar.cpp.file.suffixes=- -Dsonar.objc.file.suffixes=-"
         fi
 
         echo "::endgroup::"
 
-        # Esporta le variabili per lo step successivo
+        # Esporta le variabili in modo sicuro (Multiline support non necessario qui ma buona pratica)
         echo "SONAR_BINARIES=$SONAR_BINARIES" >> $GITHUB_ENV
         echo "SONAR_ARGS=$SONAR_ARGS" >> $GITHUB_ENV
 
     - name: SonarCloud Scan
       uses: sonarsource/sonarqube-scan-action@v6
-      # Usa la variabile continue_error definita sopra (user choice)
       continue-on-error: false
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       with:
+        # Args passati in modo pulito. Notare le virgolette intorno alle variabili env
         args: >
           ${{ env.SONAR_ARGS }}
           -Dsonar.java.binaries=${{ env.SONAR_BINARIES }}
+          -Dsonar.qualitygate.wait=true
